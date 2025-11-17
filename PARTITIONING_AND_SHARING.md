@@ -15,33 +15,65 @@ A social media platform with 100 million users needs to scale its user profile d
 
 ### Partitioning Strategy: Hash-based Sharding by User ID
 
-```mermaid
-graph TB
-    subgraph Clients
-        A[Mobile App]
-        B[Web App]
-        C[API Service]
-    end
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          CLIENT LAYER                                   │
+├─────────────────┬───────────────────┬───────────────────────────────────┤
+│                 │                   │                                   │
+│  ┌──────────┐   │  ┌──────────┐     │    ┌──────────┐                  │
+│  │ Mobile   │   │  │   Web    │     │    │   API    │                  │
+│  │   App    │   │  │   App    │     │    │ Service  │                  │
+│  └─────┬────┘   │  └─────┬────┘     │    └─────┬────┘                  │
+│        │        │        │          │          │                       │
+└────────┼────────┴────────┼──────────┴──────────┼───────────────────────┘
+         │                 │                     │
+         │                 │                     │
+         └─────────────────┼─────────────────────┘
+                           │
+                           ▼
+         ┌─────────────────────────────────────────────┐
+         │      APPLICATION LAYER - SHARD ROUTER       │
+         │                                             │
+         │   Hash Function: shard = user_id % 4        │
+         │   Routes requests to correct database       │
+         └──┬────────┬─────────┬────────┬─────────────┘
+            │        │         │        │
+  ┌─────────┘        │         │        └──────────┐
+  │   user_id % 4=0  │         │  user_id % 4=3    │
+  │                  │         │                   │
+  ▼                  ▼         ▼                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       DATABASE SHARDS                               │
+├──────────────┬──────────────┬──────────────┬──────────────────────┤
+│   SHARD 0    │   SHARD 1    │   SHARD 2    │      SHARD 3         │
+├──────────────┼──────────────┼──────────────┼──────────────────────┤
+│  ╔════════╗  │  ╔════════╗  │  ╔════════╗  │    ╔════════╗        │
+│  ║  DB 0  ║  │  ║  DB 1  ║  │  ║  DB 2  ║  │    ║  DB 3  ║        │
+│  ║        ║  │  ║        ║  │  ║        ║  │    ║        ║        │
+│  ║ Users: ║  │  ║ Users: ║  │  ║ Users: ║  │    ║ Users: ║        │
+│  ║ 0,4,8  ║  │  ║ 1,5,9  ║  │  ║ 2,6,10 ║  │    ║ 3,7,11 ║        │
+│  ║ 12,16  ║  │  ║ 13,17  ║  │  ║ 14,18  ║  │    ║ 15,19  ║        │
+│  ║  ...   ║  │  ║  ...   ║  │  ║  ...   ║  │    ║  ...   ║        │
+│  ║        ║  │  ║        ║  │  ║        ║  │    ║        ║        │
+│  ║ 25M    ║  │  ║ 25M    ║  │  ║ 25M    ║  │    ║ 25M    ║        │
+│  ║ users  ║  │  ║ users  ║  │  ║ users  ║  │    ║ users  ║        │
+│  ╚════════╝  │  ╚════════╝  │  ╚════════╝  │    ╚════════╝        │
+│              │              │              │                      │
+│  Server 1    │  Server 2    │  Server 3    │    Server 4          │
+└──────────────┴──────────────┴──────────────┴──────────────────────┘
+```
 
-    subgraph "Application Layer"
-        Router[Shard Router<br/>Hash Function: user_id % 4]
-    end
+### Data Distribution Example
 
-    subgraph "Database Shards"
-        DB0[(Shard 0<br/>Users: 0, 4, 8...<br/>25M users)]
-        DB1[(Shard 1<br/>Users: 1, 5, 9...<br/>25M users)]
-        DB2[(Shard 2<br/>Users: 2, 6, 10...<br/>25M users)]
-        DB3[(Shard 3<br/>Users: 3, 7, 11...<br/>25M users)]
-    end
+```
+User ID → Shard Mapping:
 
-    A --> Router
-    B --> Router
-    C --> Router
+user_id: 12345  →  12345 % 4 = 1  →  Stored on SHARD 1
+user_id: 99999  →  99999 % 4 = 3  →  Stored on SHARD 3
+user_id: 88888  →  88888 % 4 = 0  →  Stored on SHARD 0
+user_id: 77777  →  77777 % 4 = 1  →  Stored on SHARD 1
 
-    Router -->|user_id % 4 = 0| DB0
-    Router -->|user_id % 4 = 1| DB1
-    Router -->|user_id % 4 = 2| DB2
-    Router -->|user_id % 4 = 3| DB3
+Result: Even distribution across all 4 shards
 ```
 
 ### Key Concepts
@@ -72,11 +104,32 @@ graph TB
 ### Example Query Flow
 
 ```
-1. Request: Get user profile for user_id = 12345
-2. Router calculates: 12345 % 4 = 1
-3. Router forwards request to Shard 1
-4. Shard 1 returns user profile
-5. Response sent back to client
+Step-by-Step: Get user profile for user_id = 12345
+
+┌─────────┐
+│ Client  │  1. Request: GET /user/12345
+└────┬────┘
+     │
+     ▼
+┌──────────────────┐
+│  Shard Router    │  2. Calculate: 12345 % 4 = 1
+└────┬─────────────┘     Route to Shard 1
+     │
+     ▼
+┌──────────────────┐
+│    Shard 1       │  3. Query: SELECT * FROM users WHERE id=12345
+│   (Server 2)     │  4. Return: {id: 12345, name: "John", ...}
+└────┬─────────────┘
+     │
+     ▼
+┌──────────────────┐
+│  Shard Router    │  5. Forward response
+└────┬─────────────┘
+     │
+     ▼
+┌─────────┐
+│ Client  │  6. Receive user profile
+└─────────┘
 ```
 
 ---
@@ -88,62 +141,103 @@ An e-commerce platform needs to cache product information, user sessions, and sh
 
 ### Partitioning Strategy: Consistent Hashing
 
-```mermaid
-graph TB
-    subgraph "Client Layer"
-        C1[Web Server 1]
-        C2[Web Server 2]
-        C3[Web Server 3]
-        C4[Mobile API]
-    end
-
-    subgraph "Cache Client Library"
-        CH[Consistent Hash Ring<br/>Manages node topology]
-    end
-
-    subgraph "Cache Nodes"
-        N1[Cache Node 1<br/>Products A-G<br/>Sessions<br/>10GB RAM]
-        N2[Cache Node 2<br/>Products H-M<br/>Carts<br/>10GB RAM]
-        N3[Cache Node 3<br/>Products N-S<br/>Sessions<br/>10GB RAM]
-        N4[Cache Node 4<br/>Products T-Z<br/>Carts<br/>10GB RAM]
-    end
-
-    subgraph "Replication"
-        R1[Replica Node 1]
-        R2[Replica Node 2]
-    end
-
-    C1 --> CH
-    C2 --> CH
-    C3 --> CH
-    C4 --> CH
-
-    CH -->|Key: product_A| N1
-    CH -->|Key: product_M| N2
-    CH -->|Key: product_R| N3
-    CH -->|Key: product_Z| N4
-
-    N1 -.->|Async replication| R1
-    N3 -.->|Async replication| R2
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        CLIENT LAYER                                  │
+├────────────┬────────────┬────────────┬──────────────────────────────┤
+│            │            │            │                              │
+│ ┌────────┐ │ ┌────────┐ │ ┌────────┐ │  ┌────────┐                 │
+│ │  Web   │ │ │  Web   │ │ │  Web   │ │  │ Mobile │                 │
+│ │Server 1│ │ │Server 2│ │ │Server 3│ │  │  API   │                 │
+│ └───┬────┘ │ └───┬────┘ │ └───┬────┘ │  └───┬────┘                 │
+│     │      │     │      │     │      │      │                      │
+└─────┼──────┴─────┼──────┴─────┼──────┴──────┼──────────────────────┘
+      │            │            │             │
+      └────────────┼────────────┼─────────────┘
+                   │            │
+                   ▼            ▼
+      ┌────────────────────────────────────────┐
+      │   CACHE CLIENT LIBRARY (embedded)      │
+      │                                        │
+      │   • Maintains consistent hash ring     │
+      │   • Tracks node health                 │
+      │   • Routes keys to correct node        │
+      └────┬──────┬──────┬──────┬─────────────┘
+           │      │      │      │
+           │      │      │      │
+    ┌──────┘      │      │      └──────┐
+    │             │      │             │
+    ▼             ▼      ▼             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    CACHE NODE CLUSTER                           │
+├──────────────┬──────────────┬──────────────┬───────────────────┤
+│  CACHE       │  CACHE       │  CACHE       │   CACHE           │
+│  NODE 1      │  NODE 2      │  NODE 3      │   NODE 4          │
+├──────────────┼──────────────┼──────────────┼───────────────────┤
+│  ┌────────┐  │  ┌────────┐  │  ┌────────┐  │   ┌────────┐      │
+│  │Products│  │  │Products│  │  │Products│  │   │Products│      │
+│  │  A-G   │  │  │  H-M   │  │  │  N-S   │  │   │  T-Z   │      │
+│  ├────────┤  │  ├────────┤  │  ├────────┤  │   ├────────┤      │
+│  │Sessions│  │  │ Carts  │  │  │Sessions│  │   │ Carts  │      │
+│  ├────────┤  │  ├────────┤  │  ├────────┤  │   ├────────┤      │
+│  │ 10GB   │  │  │ 10GB   │  │  │ 10GB   │  │   │ 10GB   │      │
+│  │  RAM   │  │  │  RAM   │  │  │  RAM   │  │   │  RAM   │      │
+│  └────────┘  │  └────────┘  │  └────────┘  │   └────────┘      │
+│              │              │              │                   │
+│  Port: 6379  │  Port: 6380  │  Port: 6381  │   Port: 6382      │
+└──────┬───────┴──────────────┴──────┬───────┴───────────────────┘
+       │                             │
+       │  Async Replication          │  Async Replication
+       ▼                             ▼
+  ┌──────────┐                  ┌──────────┐
+  │ Replica  │                  │ Replica  │
+  │  Node 1  │                  │  Node 2  │
+  └──────────┘                  └──────────┘
 ```
 
 ### Visual: Consistent Hash Ring
 
 ```
-         0° (Node 1)
-            |
-      270°  +  90° (Node 2)
-            |
-        180° (Node 3)
+                        0° / 360°
+                      (Cache Node 1)
+                           *
+                          /|\
+                         / | \
+                        /  |  \
+                       /   |   \
+                      /    |    \
+                     /     |     \
+            315°    /      |      \    45°
+        (cart:xyz) /       |       \ (product:12345)
+                  /        |        \
+                 /         |         \
+                /          |          \
+               /           |           \
+              *            |            *
+        270°               |               90°
+                           |          (Cache Node 2)
+                           |
+                           |
+                           *
+                         180°
+                    (Cache Node 3)
+                   (session:abc)
 
-Keys are hashed to points on the ring:
-- "product:12345" → 45° → Stored on Node 2
-- "session:abc" → 200° → Stored on Node 3
-- "cart:xyz" → 315° → Stored on Node 1
 
-When Node 2 fails:
-- Keys from 90°-180° move to Node 3
-- Only 1/4 of data needs to be remapped
+Key Distribution:
+┌────────────────┬──────────────┬──────────────────────────┐
+│ Key            │ Hash Result  │ Stored On                │
+├────────────────┼──────────────┼──────────────────────────┤
+│ product:12345  │    45°       │ Node 2 (first clockwise) │
+│ session:abc    │   200°       │ Node 3 (first clockwise) │
+│ cart:xyz       │   315°       │ Node 1 (first clockwise) │
+│ product:99999  │   120°       │ Node 3 (first clockwise) │
+└────────────────┴──────────────┴──────────────────────────┘
+
+When Node 2 FAILS:
+    Before: Keys from 0°-90° → Node 1, 90°-180° → Node 2
+    After:  Keys from 0°-180° → ALL go to Node 3
+    Impact: Only 25% of total keys need remapping!
 ```
 
 ### Key Concepts
@@ -174,17 +268,36 @@ When Node 2 fails:
 ### Example: Handling Node Failure
 
 ```
-Initial state: 4 nodes, each handles 25% of keys
+TIMELINE: Cache Node 2 Failure
 
-Node 2 fails:
-1. Client detects failure (timeout/health check)
-2. Client library updates hash ring (removes Node 2)
-3. Keys previously on Node 2 now map to Node 3
-4. Cache misses increase for those keys
-5. Data gradually repopulates on Node 3
-6. Optional: Promote replica to primary
+t=0: Normal Operation (4 nodes)
+     ┌──────┬──────┬──────┬──────┐
+     │Node 1│Node 2│Node 3│Node 4│
+     │ 25%  │ 25%  │ 25%  │ 25%  │  ← Each handles 25% of keys
+     └──────┴──────┴──────┴──────┘
 
-Result: Only 25% of keys affected, 75% continue working
+t=1: Node 2 Crashes
+     ┌──────┬──────┬──────┬──────┐
+     │Node 1│ XXXX │Node 3│Node 4│
+     │ 25%  │ FAIL │ 25%  │ 25%  │
+     └──────┴──────┴──────┴──────┘
+
+t=2: Client Library Detects Failure (timeout/health check)
+     • Removes Node 2 from hash ring
+     • Recalculates key positions
+
+t=3: Keys Redistributed
+     ┌──────┬──────┬──────┐
+     │Node 1│Node 3│Node 4│
+     │ 25%  │ 50%  │ 25%  │  ← Node 3 now handles Node 2's traffic
+     └──────┴──────┴──────┘
+
+t=4: Cache Repopulation
+     • Cache misses for old Node 2 keys
+     • Data fetched from database
+     • Node 3 gradually fills with data
+
+Result: 75% of requests unaffected, system continues operating!
 ```
 
 ---
@@ -196,63 +309,127 @@ A ride-sharing app needs to process real-time events: ride requests, driver loca
 
 ### Partitioning Strategy: Topic Partitions with Consumer Groups
 
-```mermaid
-graph TB
-    subgraph "Event Producers"
-        P1[Mobile App<br/>Publishes ride requests]
-        P2[Driver App<br/>Publishes location updates]
-        P3[Payment Service<br/>Publishes transactions]
-    end
-
-    subgraph "Message Queue Cluster"
-        subgraph "Topic: ride-events"
-            Part0[Partition 0<br/>user_id % 4 = 0<br/>Leader: Broker 1]
-            Part1[Partition 1<br/>user_id % 4 = 1<br/>Leader: Broker 2]
-            Part2[Partition 2<br/>user_id % 4 = 2<br/>Leader: Broker 3]
-            Part3[Partition 3<br/>user_id % 4 = 3<br/>Leader: Broker 1]
-        end
-    end
-
-    subgraph "Consumer Group: ride-processors"
-        C1[Consumer 1<br/>Reads: Part 0]
-        C2[Consumer 2<br/>Reads: Part 1]
-        C3[Consumer 3<br/>Reads: Part 2, 3]
-    end
-
-    subgraph "Consumer Group: analytics"
-        A1[Analytics 1<br/>Reads: Part 0, 1]
-        A2[Analytics 2<br/>Reads: Part 2, 3]
-    end
-
-    P1 -->|Partition key: user_id| Part0
-    P1 -->|Partition key: user_id| Part1
-    P2 -->|Partition key: driver_id| Part2
-    P3 -->|Partition key: user_id| Part3
-
-    Part0 --> C1
-    Part1 --> C2
-    Part2 --> C3
-    Part3 --> C3
-
-    Part0 --> A1
-    Part1 --> A1
-    Part2 --> A2
-    Part3 --> A2
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         EVENT PRODUCERS                                  │
+├────────────────────┬────────────────────┬────────────────────────────────┤
+│                    │                    │                                │
+│  ┌──────────────┐  │  ┌──────────────┐  │    ┌──────────────┐           │
+│  │  Mobile App  │  │  │  Driver App  │  │    │   Payment    │           │
+│  │              │  │  │              │  │    │   Service    │           │
+│  │ Publishes:   │  │  │ Publishes:   │  │    │              │           │
+│  │ • ride req   │  │  │ • location   │  │    │ Publishes:   │           │
+│  │              │  │  │ • status     │  │    │ • txn events │           │
+│  └───────┬──────┘  │  └───────┬──────┘  │    └───────┬──────┘           │
+│          │         │          │         │            │                  │
+└──────────┼─────────┴──────────┼─────────┴────────────┼──────────────────┘
+           │                    │                      │
+           │ (partition key:    │  (partition key:     │ (partition key:
+           │  user_id)          │   driver_id)         │  user_id)
+           │                    │                      │
+           ▼                    ▼                      ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    MESSAGE QUEUE CLUSTER                                 │
+│                    Topic: "ride-events"                                  │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌────────────────────┬────────────────────┬───────────────────────┐    │
+│  │   PARTITION 0      │   PARTITION 1      │   PARTITION 2         │    │
+│  │ user_id % 4 = 0    │ user_id % 4 = 1    │ user_id % 4 = 2       │    │
+│  │ Leader: Broker 1   │ Leader: Broker 2   │ Leader: Broker 3      │    │
+│  ├────────────────────┼────────────────────┼───────────────────────┤    │
+│  │ [E1][E2][E3][E4]   │ [E1][E2][E3][E4]   │ [E1][E2][E3][E4]      │    │
+│  │  ↑                 │  ↑                 │  ↑                    │    │
+│  │ Offset: 0→         │ Offset: 0→         │ Offset: 0→            │    │
+│  │                    │                    │                       │    │
+│  │ Users: 0,4,8,12    │ Users: 1,5,9,13    │ Users: 2,6,10,14      │    │
+│  └─────────┬──────────┴──────────┬─────────┴──────────┬────────────┘    │
+│            │                     │                    │                 │
+│  ┌─────────┴───────────────────────────────────────────┴─────────┐      │
+│  │                      PARTITION 3                              │      │
+│  │                   user_id % 4 = 3                             │      │
+│  │                   Leader: Broker 1                            │      │
+│  ├───────────────────────────────────────────────────────────────┤      │
+│  │                   [E1][E2][E3][E4]                            │      │
+│  │                    ↑                                          │      │
+│  │                   Offset: 0→                                  │      │
+│  │                                                               │      │
+│  │                   Users: 3,7,11,15                            │      │
+│  └───────────────────────────────────────────────────────────────┘      │
+│                                                                          │
+└──┬────────────────┬───────────────┬──────────────┬────────────────────┬─┘
+   │                │               │              │                    │
+   │                │               │              │                    │
+   ▼                ▼               │              │                    │
+┌─────────────────────────────────┐ │              │                    │
+│  CONSUMER GROUP: ride-processors│ │              │                    │
+├─────────────────────────────────┤ │              │                    │
+│                                 │ │              │                    │
+│  ┌───────────┐  ┌────────────┐  │ │              │                    │
+│  │Consumer 1 │  │Consumer 2  │  │ │              │                    │
+│  │           │  │            │  │ │              │                    │
+│  │Reads:     │  │Reads:      │  │ │              │                    │
+│  │Part 0     │  │Part 1      │  │ │              │                    │
+│  └───────────┘  └────────────┘  │ │              │                    │
+│                                 │ │              │                    │
+│  ┌───────────────────────────┐  │ │              │                    │
+│  │      Consumer 3           │  │ │              │                    │
+│  │                           │  │ │              │                    │
+│  │ Reads: Part 2, Part 3     │  │ │              │                    │
+│  └───────────────────────────┘  │ │              │                    │
+└─────────────────────────────────┘ │              │                    │
+                                    ▼              ▼                    ▼
+                              ┌──────────────────────────────────────────┐
+                              │ CONSUMER GROUP: analytics                │
+                              ├──────────────────────────────────────────┤
+                              │                                          │
+                              │  ┌───────────────────────────────────┐   │
+                              │  │      Analytics Consumer 1         │   │
+                              │  │      Reads: Part 0, Part 1        │   │
+                              │  └───────────────────────────────────┘   │
+                              │                                          │
+                              │  ┌───────────────────────────────────┐   │
+                              │  │      Analytics Consumer 2         │   │
+                              │  │      Reads: Part 2, Part 3        │   │
+                              │  └───────────────────────────────────┘   │
+                              │                                          │
+                              │  (Independent offset tracking)           │
+                              └──────────────────────────────────────────┘
 ```
 
-### Partition Assignment Visualization
+### Partition Data Structure
 
 ```
 Topic: ride-events (4 partitions)
 
-Partition 0: [user_1, user_5, user_9, user_13...]  ← Consumer 1
-Partition 1: [user_2, user_6, user_10, user_14...] ← Consumer 2
-Partition 2: [user_3, user_7, user_11, user_15...] ← Consumer 3
-Partition 3: [user_4, user_8, user_12, user_16...] ← Consumer 3
+PARTITION 0 (user_id % 4 = 0):
+┌──────────────────────────────────────────────────────────────┐
+│ Offset │ Timestamp           │ Key (user_id) │ Event        │
+├────────┼─────────────────────┼───────────────┼──────────────┤
+│   0    │ 2025-11-17 10:00:00 │ user_4        │ ride_request │
+│   1    │ 2025-11-17 10:00:05 │ user_4        │ ride_confirm │
+│   2    │ 2025-11-17 10:01:00 │ user_8        │ ride_request │
+│   3    │ 2025-11-17 10:02:00 │ user_12       │ ride_request │
+│  ...   │        ...          │      ...      │     ...      │
+└────────┴─────────────────────┴───────────────┴──────────────┘
+          ↑
+    Consumer 1 reads here (maintains own offset)
 
-Each partition maintains strict ordering:
-Part 0: [Event1(user_1), Event2(user_1), Event3(user_5)...]
-        Offset: 0         1                2
+
+PARTITION 1 (user_id % 4 = 1):
+┌──────────────────────────────────────────────────────────────┐
+│ Offset │ Timestamp           │ Key (user_id) │ Event        │
+├────────┼─────────────────────┼───────────────┼──────────────┤
+│   0    │ 2025-11-17 10:00:01 │ user_1        │ ride_request │
+│   1    │ 2025-11-17 10:00:10 │ user_5        │ ride_request │
+│   2    │ 2025-11-17 10:01:05 │ user_1        │ ride_complete│
+│   3    │ 2025-11-17 10:02:30 │ user_9        │ ride_request │
+│  ...   │        ...          │      ...      │     ...      │
+└────────┴─────────────────────┴───────────────┴──────────────┘
+          ↑
+    Consumer 2 reads here
+
+ORDERING GUARANTEE: All events for user_1 are in order within Partition 1!
 ```
 
 ### Key Concepts
@@ -287,53 +464,109 @@ Part 0: [Event1(user_1), Event2(user_1), Event3(user_5)...]
 ```
 Event: User 12345 requests a ride
 
-1. Producer publishes:
-   {
-     "user_id": 12345,
-     "event": "ride_requested",
-     "timestamp": "2025-11-17T10:00:00Z"
-   }
-   Partition key: user_id
+STEP 1: Producer Publishes Event
+┌──────────────────────────────────────┐
+│ {                                    │
+│   "user_id": 12345,                  │
+│   "event": "ride_requested",         │
+│   "location": {lat: 37.7, lon: -122},│
+│   "timestamp": "2025-11-17T10:00:00" │
+│ }                                    │
+└──────────────────────────────────────┘
+        │
+        │ Partition key: user_id = 12345
+        ▼
+┌──────────────────────────────────────┐
+│ Partition Calculation:               │
+│ partition = hash(12345) % 4 = 1      │
+└──────────────────────────────────────┘
+        │
+        ▼
+┌──────────────────────────────────────┐
+│ PARTITION 1 (on Broker 2)            │
+│                                      │
+│ Append to log:                       │
+│ • Assigned offset: 45023             │
+│ • Write to disk                      │
+│ • Replicate to 2 replica brokers     │
+└──────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│ TWO CONSUMER GROUPS READ SAME EVENT (independent offsets) │
+└────────────────────────────────────────────────────────────┘
+        │
+        ├──────────────────────────────┬─────────────────────┐
+        ▼                              ▼                     ▼
+┌──────────────────┐        ┌──────────────────┐   ┌──────────────────┐
+│  Consumer 2      │        │  Analytics 1     │   │  Audit Logger    │
+│  (ride-processor)│        │  (analytics grp) │   │  (audit group)   │
+├──────────────────┤        ├──────────────────┤   ├──────────────────┤
+│ 1. Fetch from    │        │ 1. Fetch same    │   │ 1. Fetch same    │
+│    offset 45020  │        │    event         │   │    event         │
+│                  │        │                  │   │                  │
+│ 2. Process event │        │ 2. Update real-  │   │ 2. Store to      │
+│    • Match driver│        │    time dashboard│   │    audit log     │
+│    • Send notif  │        │                  │   │                  │
+│                  │        │ 3. Commit offset │   │ 3. Commit offset │
+│ 3. Commit offset │        │    45023 (indep) │   │    45023 (indep) │
+│    45023         │        │                  │   │                  │
+└──────────────────┘        └──────────────────┘   └──────────────────┘
 
-2. Partition calculation:
-   partition = hash(12345) % 4 = 1
-
-3. Message written to Partition 1:
-   - Appended to end of log
-   - Assigned offset: 45023
-   - Replicated to 2 replica brokers
-
-4. Consumer 2 reads from Partition 1:
-   - Fetches messages starting from offset 45020
-   - Processes event
-   - Commits offset 45023
-
-5. Analytics Consumer Group:
-   - Analytics 1 independently reads same message
-   - Uses for real-time dashboards
-   - Maintains separate offset
+Each consumer group maintains INDEPENDENT progress!
 ```
 
-### Rebalancing Scenario
+### Consumer Rebalancing Scenario
 
 ```
-Initial: 4 partitions, 3 consumers
-- Consumer 1: Partition 0
-- Consumer 2: Partition 1
-- Consumer 3: Partitions 2, 3
+SCENARIO: Scaling Consumer Group
 
-Consumer 4 joins:
-1. Consumer group coordinator triggers rebalance
-2. All consumers stop processing
-3. Partitions reassigned:
-   - Consumer 1: Partition 0
-   - Consumer 2: Partition 1
-   - Consumer 3: Partition 2
-   - Consumer 4: Partition 3
-4. Consumers resume from last committed offset
-5. Processing distributed more evenly
+INITIAL STATE (3 consumers, 4 partitions):
+┌──────────────────────────────────────────────────────────────┐
+│  Consumer Group: ride-processors                             │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Consumer 1  ───────────> Partition 0  (25% of events)      │
+│                                                              │
+│  Consumer 2  ───────────> Partition 1  (25% of events)      │
+│                                                              │
+│  Consumer 3  ───┬──────> Partition 2  (25% of events)       │
+│                 └──────> Partition 3  (25% of events)       │
+│                                                              │
+│  Issue: Consumer 3 handling 50% of load!                    │
+└──────────────────────────────────────────────────────────────┘
 
-Result: Better throughput, lower latency per consumer
+
+EVENT: New Consumer 4 Joins
+┌──────────────────────────────────────────────────────────────┐
+│ 1. Consumer 4 sends JoinGroup request                        │
+│ 2. Coordinator triggers REBALANCE                            │
+│ 3. All consumers STOP processing                             │
+│ 4. Coordinator reassigns partitions                          │
+└──────────────────────────────────────────────────────────────┘
+
+
+NEW STATE (4 consumers, 4 partitions):
+┌──────────────────────────────────────────────────────────────┐
+│  Consumer Group: ride-processors (after rebalance)           │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Consumer 1  ───────────> Partition 0  (25% of events)      │
+│                                                              │
+│  Consumer 2  ───────────> Partition 1  (25% of events)      │
+│                                                              │
+│  Consumer 3  ───────────> Partition 2  (25% of events)      │
+│                                                              │
+│  Consumer 4  ───────────> Partition 3  (25% of events)  ✓   │
+│                                                              │
+│  Result: Perfectly balanced load distribution!               │
+└──────────────────────────────────────────────────────────────┘
+
+TIMELINE:
+t=0:    Consumer 4 joins
+t=1-2:  Rebalancing (brief pause in processing)
+t=3:    All consumers resume from last committed offset
+t=4+:   25% better throughput, lower latency per consumer
 ```
 
 ---
@@ -349,6 +582,8 @@ Result: Better throughput, lower latency per consumer
 | **Sharing Pattern** | Shared-nothing | Shared cache with local clients | Shared topic, partitioned consumption |
 | **Typical Use Case** | User profiles, transactional data | Sessions, product catalog | Events, logs, real-time data |
 | **Failure Handling** | Failover to replica | Consistent hashing redistribution | Consumer rebalancing |
+| **Scalability** | Add shards (complex) | Add nodes (simple) | Add consumers (automatic) |
+| **Ordering Guarantee** | No | No | Yes (per partition) |
 
 ---
 
@@ -358,15 +593,23 @@ Result: Better throughput, lower latency per consumer
 
 1. **Hash Partitioning**: Use when you need even distribution and mostly single-record access
    - Example: User profiles, product catalog
+   - Pro: Even distribution, simple logic
+   - Con: Hard to rebalance
 
 2. **Range Partitioning**: Use when you frequently query ranges of data
    - Example: Time-series data, logs by date
+   - Pro: Range queries efficient
+   - Con: Hot spots on recent data
 
 3. **Consistent Hashing**: Use when nodes frequently join/leave the cluster
    - Example: Distributed caches, CDN
+   - Pro: Minimal data movement
+   - Con: Complex implementation
 
 4. **Key-based Partitioning**: Use when ordering matters within a key
    - Example: Event streams, activity feeds
+   - Pro: Ordering guaranteed
+   - Con: Uneven distribution if keys skewed
 
 ### Sharing Considerations
 
@@ -375,6 +618,24 @@ Result: Better throughput, lower latency per consumer
 - **Cross-partition Operations**: Minimize joins/aggregations across partitions
 - **Monitoring**: Track partition sizes, request distribution, and rebalancing events
 
+### Partition Key Selection
+
+```
+Good Partition Keys:
+✓ user_id        - High cardinality, even distribution
+✓ order_id       - Unique, randomly distributed
+✓ device_id      - Many unique values
+
+Bad Partition Keys:
+✗ country        - Low cardinality (few values)
+✗ date           - Creates hot spots on current date
+✗ status         - Very low cardinality (active/inactive)
+
+Composite Keys (when needed):
+• country + user_id    - Balances locality with distribution
+• date + order_id      - Enables time queries with good distribution
+```
+
 ---
 
 ## Conclusion
@@ -382,7 +643,34 @@ Result: Better throughput, lower latency per consumer
 Partitioning and sharing are fundamental to building scalable distributed systems. Each use case demonstrates different trade-offs:
 
 - **Database Sharding**: Optimizes for transactional consistency and storage scalability
-- **Distributed Cache**: Optimizes for read latency and graceful degradation
-- **Message Queue**: Optimizes for throughput, ordering, and parallel processing
+  - Best for: User data, profiles, transactional records
+  - Trade-off: Complex cross-shard queries
 
-Choose the strategy that aligns with your system's primary bottleneck and access patterns.
+- **Distributed Cache**: Optimizes for read latency and graceful degradation
+  - Best for: Session data, frequently accessed content
+  - Trade-off: Eventual consistency
+
+- **Message Queue**: Optimizes for throughput, ordering, and parallel processing
+  - Best for: Event streams, real-time data processing
+  - Trade-off: Fixed partition count, rebalancing overhead
+
+**Choose the strategy that aligns with your system's primary bottleneck and access patterns.**
+
+### Quick Decision Guide
+
+```
+Start Here
+    │
+    ▼
+Need to store data permanently? ─── YES ──> Database Sharding
+    │
+    NO
+    │
+    ▼
+Need ordering guarantees? ─── YES ──> Message Queue Partitioning
+    │
+    NO
+    │
+    ▼
+Need fast reads/temporary storage? ─── YES ──> Distributed Cache
+```
